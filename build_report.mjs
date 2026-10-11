@@ -11,7 +11,9 @@ import path from 'node:path';
 const SRC = process.argv[2];
 const OUT = process.argv[3] || '.';
 const LABEL = process.argv[4] || path.basename(SRC);
-if (!SRC || !fs.existsSync(SRC)) { console.error('用法: node build_report.mjs <measures.jsonl> <输出目录> [标签]'); process.exit(1); }
+// 可选：源码根目录（给了就把离群点的源码片段附进报告，否则跳过）
+const SRC_ROOT = process.argv[5] || process.env.LCM_SRC_ROOT || '';
+if (!SRC || !fs.existsSync(SRC)) { console.error('用法: node build_report.mjs <measures.jsonl> <输出目录> [标签] [源码根目录]'); process.exit(1); }
 fs.mkdirSync(OUT, { recursive: true });
 
 const t0 = Date.now();
@@ -90,6 +92,52 @@ for (const i of [...up, ...dn]) {
 const modTop = [...modAgg].sort((x, y) => (y[1].up + y[1].dn) - (x[1].up + x[1].dn)).slice(0, 40);
 
 // ---------- 输出 1：report.md（给 AI 读的主文件）----------
+// 若有源码根目录，给离群点附上 Lean 源码片段 —— 这才是"为什么偏离"的线索。
+// 没有它，报告只能回答"哪些偏离"，回答不了"为什么"。
+const srcIndex = new Map();          // 声明名 -> {file, line}
+const srcCache = new Map();          // 文件 -> 行数组
+if (SRC_ROOT && fs.existsSync(SRC_ROOT)) {
+  say('建立声明名 -> 文件 索引（供附源码用）…');
+  const all = [];
+  (function walk(d) {
+    let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== '.lake' && e.name !== '.git') walk(p); }
+      else if (e.name.endsWith('.lean')) all.push(p);
+    }
+  })(SRC_ROOT);
+  const DECL = /^[ \t]*(?:@\[[^\]]*\][ \t]*)*(?:(?:private|protected|noncomputable|unsafe|partial|scoped|local|mutual|instance|nonrec)\s+)*(theorem|lemma|def|abbrev|structure|class|inductive|instance|axiom|opaque)\b[ \t]*([A-Za-z_\u00C0-\u024F][\w'\u00C0-\u024F.]*)?/gm;
+  const pending = new Set();
+  for (const i of [...up.slice(0, 25), ...dn.slice(0, 25)]) pending.add(names[i]);
+  for (const file of all) {
+    if (pending.size === 0) break;
+    let lines; try { lines = fs.readFileSync(file, 'utf8').split('\n'); } catch { continue; }
+    for (let ln = 0; ln < lines.length; ln++) {
+      DECL.lastIndex = 0;
+      const m = DECL.exec(lines[ln]);
+      if (!m || !m[2]) continue;
+      const short = m[2];
+      for (const want of pending) {
+        if (want === short || want.endsWith('.' + short) || short === want.split('.').pop()) {
+          if (!srcIndex.has(want)) { srcIndex.set(want, { file, line: ln + 1 }); srcCache.set(file, lines); }
+          pending.delete(want);
+        }
+      }
+    }
+  }
+  say(`  索引到 ${srcIndex.size} / 50 条离群点源码位置`);
+}
+function srcSnippet(name, maxLines = 12) {
+  const loc = srcIndex.get(name);
+  if (!loc) return null;
+  let lines = srcCache.get(loc.file);
+  if (!lines) { try { lines = fs.readFileSync(loc.file, 'utf8').split('\n'); srcCache.set(loc.file, lines); } catch { return null; } }
+  const body = lines.slice(loc.line - 1, loc.line - 1 + maxLines).join('\n').replace(/\s+$/, '');
+  const rel = path.relative(SRC_ROOT, loc.file).replace(/\\/g, '/');
+  return { rel, line: loc.line, body };
+}
+
 const f = (v, n = 2) => (typeof v === 'number' ? v.toFixed(n) : v);
 const md = [];
 md.push(`# 压缩签名测量报告：${LABEL}`);
@@ -169,12 +217,83 @@ md.push('| 残差 | depth | log2U | 声明 |');
 md.push('|---|---|---|---|');
 for (const i of dn.slice(0, 25)) md.push(`| ${f(res[i], 1)} | ${depth[i]} | ${f(log2U[i], 1)} | \`${names[i]}\` |`);
 md.push('');
+
+// ---------- 5.4 离群点源码片段（回答"为什么偏离"）----------
+if (srcIndex.size > 0) {
+  md.push('### 5.4 离群点源码片段');
+  md.push('');
+  md.push('前面几节说明「**哪些**声明偏离了拟合线」，本节给出 **Lean 源码片段**，');
+  md.push('作为回答「**为什么**偏离」的线索。');
+  md.push('');
+  md.push('> ⚠️ **可靠性警告（务必读）**');
+  md.push('>');
+  md.push('> 下面的「声明名 → 源码文件」映射是**按名字反查源码**得到的，**不保证准确**。');
+  md.push('> 已知失效情形：');
+  md.push('>');
+  md.push('> 1. **同名不同声明**：不同命名空间下有同名 `functor` / `map`，可能匹配到无关的那个；');
+  md.push('> 2. **自动生成的名字**（`instXxx`、`_private.*`、`*._proof_1`）在源码里没有字面对应，必然匹配失败或错配；');
+  md.push('> 3. 50 条离群点里，本次只索引到个位数到二十几条。');
+  md.push('>');
+  md.push('> **正确做法**是在抽取阶段（`measure.lean`）用 Lean 自己的 API 带上声明所在的');
+  md.push('> 文件名与行号，而不是事后按名字猜。当前版本尚未这么做。');
+  md.push('>');
+  md.push('> **结论**：把本节当"在哪个文件附近"的弱线索，**不要当作确证**。');
+  md.push(`> 本节索引命中：**${srcIndex.size} / ${Math.min(25, up.length) + Math.min(25, dn.length)}** 条。`);
+  md.push('');
+  const showSrc = (idx, side) => {
+    for (const i of idx.slice(0, 6)) {
+      const s = srcSnippet(names[i]);
+      md.push(`**${side} 残差 ${res[i] > 0 ? '+' : ''}${f(res[i], 1)} ｜ depth ${depth[i]} ｜ log2U ${f(log2U[i], 1)}**`);
+      md.push('');
+      md.push(`\`${names[i]}\``);
+      md.push('');
+      if (s) {
+        md.push(`\`${s.rel}:${s.line}\``);
+        md.push('');
+        md.push('```lean');
+        md.push(s.body);
+        md.push('```');
+      } else {
+        md.push('（未索引到源码位置）');
+      }
+      md.push('');
+    }
+  };
+  md.push('#### 上方离群');
+  md.push('');
+  showSrc(up, '上方');
+  md.push('#### 下方离群');
+  md.push('');
+  showSrc(dn, '下方');
+} else {
+  md.push('### 5.4 离群点源码片段');
+  md.push('');
+  md.push('（本次未提供源码根目录，跳过。加上源码可让人/AI 看到「为什么这些声明偏离」。）');
+  md.push('');
+}
 md.push('## 6. 给分析者的提示');
 md.push('');
 md.push('- **斜率与 r 是主结论**，可与论文的 ≈1 bit/层 直接对照。');
 md.push('- **第 3 节的分段斜率**回答"自相似是否成立"：若各区间的斜率接近，说明放大倍率与层级无关。');
 md.push('- **第 5.1 节**是最有信息量的部分：离群点按命名空间聚集，说明偏离来自**模块级的写法**而非个别声明。');
+md.push('- **第 5.4 节**给出离群点的 Lean 源码片段——这是回答「为什么偏离」的直接材料。');
 md.push('- 需要具体某条声明的细节时，再按需从 `measures.jsonl.gz` 里 grep，不要把整份数据喂给模型。');
+md.push('');
+md.push('## 7. 关于「为什么」的诚实边界');
+md.push('');
+md.push('本报告能回答的问题与不能回答的问题：');
+md.push('');
+md.push('| 问题 | 本报告能否回答 | 依据 |');
+md.push('|---|---|---|');
+md.push('| 斜率是多少？ | ✅ | 第 2 节的回归 |');
+md.push('| 斜率在不同层级是否一致？ | ✅ | 第 3 节分段回归 |');
+md.push('| 哪些声明偏离最大？ | ✅ | 第 5.1–5.3 节 |');
+md.push('| 偏离是否按模块聚集？ | ✅ | 第 5.1 节 |');
+md.push('| **偏离的数学原因是什么？** | ⚠️ 部分 | 5.4 节给了源码片段，但**名称反查不可靠**，需人工核对 |');
+md.push('| **这些偏离意味着什么样的「更好定义」？** | ❌ | 需要数学判断，本报告不涉及 |');
+md.push('');
+md.push('**已知的最有价值线索**：第 5.1 节的模块聚类是**可靠**的（它只依赖声明名，不依赖源码反查），');
+md.push('所以"某些数学领域的压缩签名系统性偏离"这个结论是站得住的。');
 md.push('');
 fs.writeFileSync(path.join(OUT, 'report.md'), md.join('\n'), 'utf8');
 
