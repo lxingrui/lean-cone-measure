@@ -2,14 +2,22 @@
 //
 // 为什么单独一个文件：run.sh 里塞 JSON 转义很容易写错（中文 + 换行 + 引号）。
 //
-// ⚠️ webhook URL 是凭证，只从环境变量读：
-//      FEISHU_WEBHOOK      （飞书自定义机器人）
+// ⚠️ webhook URL 与签名密钥都是凭证，只从环境变量读：
+//      FEISHU_WEBHOOK      （飞书自定义机器人 webhook）
+//      FEISHU_SECRET       （飞书「签名校验」密钥；机器人开了签名校验时必填，否则报 19021）
 //      WEBHOOK_URL         （通用别名；企业微信也用这个）
 //    没有设置时静默跳过，不影响主流程。
+//
+// 飞书签名算法（官方）：
+//   stringToSign = `${timestamp}\n${secret}`
+//   sign         = base64( HMAC-SHA256(key = stringToSign, data = "") )
 //
 // 用法:
 //   node notify.mjs ok|fail|start "标题" "正文（可含换行）" [详情文件]
 //   或读环境变量 NOTIFY_STATUS / NOTIFY_TITLE / NOTIFY_BODY
+
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 
 const STATUS = process.argv[2] || process.env.NOTIFY_STATUS || 'info';
 const TITLE = process.argv[3] || process.env.NOTIFY_TITLE || 'lean-cone-measure';
@@ -18,9 +26,17 @@ const DETAIL_FILE = process.argv[5] || '';
 
 const URL = process.env.FEISHU_WEBHOOK || process.env.WEBHOOK_URL || '';
 if (!URL) { console.error('[notify] 未配置 FEISHU_WEBHOOK / WEBHOOK_URL，跳过'); process.exit(0); }
+const SECRET = process.env.FEISHU_SECRET || '';
+
+// 飞书签名：开了「签名校验」的机器人必须带 timestamp + sign
+function signPayload() {
+  if (!SECRET) return {};
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const sign = crypto.createHmac('sha256', `${timestamp}\n${SECRET}`).update('').digest('base64');
+  return { timestamp, sign };
+}
 
 // 详情文件（例如 summary.json）里挑几行关键信息塞进正文
-import fs from 'node:fs';
 if (DETAIL_FILE && fs.existsSync(DETAIL_FILE)) {
   try {
     const raw = fs.readFileSync(DETAIL_FILE, 'utf8');
@@ -65,12 +81,15 @@ async function post(payload) {
   return { status: res.status, body: t };
 }
 
+const signed = signPayload();   // 未配 FEISHU_SECRET 时是 {}
+
 let result;
 try {
-  // 飞书自定义机器人：{"msg_type":"text","content":{"text":"..."}}
-  result = await post({ msg_type: 'text', content: { text } });
-  // 企业微信是 {"msgtype":"text","text":{"content":"..."}} —— 若飞书格式被拒，退回去试通用格式
-  if (!/"(StatusCode|code)"\s*:\s*0/.test(result.body) && !/"ok"/.test(result.body)) {
+  // 飞书自定义机器人：{"msg_type":"text","content":{"text":"..."}, timestamp, sign}
+  result = await post({ ...signed, msg_type: 'text', content: { text } });
+  const okResp = /"(StatusCode|code)"\s*:\s*0/.test(result.body) || /"ok"/.test(result.body);
+  if (!okResp) {
+    // 企业微信是 {"msgtype":"text","text":{"content":"..."}} —— 退回通用格式再试一次
     const alt = await post({ msgtype: 'text', text: { content: text } });
     result = { status: alt.status, body: result.body + ' | alt: ' + alt.body };
   }
@@ -79,6 +98,7 @@ try {
   process.exit(0);   // 通知失败绝不能让主任务失败
 }
 
-console.log(`[notify] HTTP ${result.status}  ${result.body.slice(0, 200)}`);
-// 飞书成功返回 {"StatusCode":0,...} 或 {"code":0,...}
-process.exit(/"(StatusCode|code)"\s*:\s*0|"ok"/.test(result.body) ? 0 : 0);
+const ok = /"(StatusCode|code)"\s*:\s*0|"ok"/.test(result.body);
+console.log(`[notify] HTTP ${result.status}${SECRET ? ' (已签名)' : ''}  ${result.body.slice(0, 300)}`);
+if (!ok) console.error('[notify] 机器人返回非成功码（不影响主流程）');
+process.exit(0);   // 无论如何都不让通知影响主任务
