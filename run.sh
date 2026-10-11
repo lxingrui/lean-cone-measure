@@ -219,10 +219,14 @@ preflight() {
     say "   2. Volume 必须在【同一个数据中心】才能挂到该 Pod"
     say "   3. 上面「所有挂载点」列表里应出现一个几十~上百 G 的卷"
     say "   4. 若卷挂在别处，设环境变量 LCM_WORK=<那个路径> 即可"
+    say "   5. 或者干脆不用网络卷：把 Container Disk 直接设成 120 GB"
     say "  当前工作目录 $WORK 落在系统盘上，继续跑只会再报"
     say "  'No space left on device (os error 28)'。"
-    die "工作盘空间不足，拒绝继续（避免白白写满系统盘）"
+    # 不要在这里直接 die：让调用方先发飞书通知再退出
+    PREFLIGHT_DISK_FAIL=1
+    return 0
   fi
+  PREFLIGHT_DISK_FAIL=0
 
   say "目标: $TARGETS${OAI_SUBTREE:+   (oai 子树=$OAI_SUBTREE)}"
   if [ "${JOBS_AUTO:-0}" = "1" ]; then
@@ -541,11 +545,35 @@ case "$PHASE" in
     ;;
   upload) run_logged upload do_upload ;;
   all)
+    # 把所有磁盘挂载点拼成一段，直接进飞书 ——
+    # 这样"网络卷有没有挂上、工作目录在哪个盘"不必再去翻被刷掉的容器日志
+    MOUNTS="$(df -BG 2>/dev/null | awk 'NR>1{printf "%s 总%s 可用%s → %s\n", $1, $2, $4, $6}')"
     notify start "lean-cone-measure 启动" \
       "目标: ${TARGETS}${OAI_SUBTREE:+   (oai 子树=$OAI_SUBTREE)}
-主机: ${VCPU} vCPU / $(free -g | awk '/^Mem:/{print $2}') GB RAM / 盘 $(df -BG / | awk 'NR==2{print $2}')
+主机: ${VCPU} vCPU / ${MEM_GB} GB RAM
 并发: JOBS=$JOBS
-自动关机: 全部跑完即关；卡死则 ${DEADLINE_H}h 后强制关"
+
+工作目录: ${WORK}
+（来源: ${WORK_SRC:-?}）
+
+挂载点:
+${MOUNTS}"
+
+    # 空间不足：先让飞书收到上面那条启动通知（含挂载点），再报失败退出
+    if [ "${PREFLIGHT_DISK_FAIL:-0}" = "1" ]; then
+      notify fail "lean-cone-measure 未启动：工作盘空间不足" \
+        "工作目录: ${WORK}   （来源: ${WORK_SRC:-?}）
+可用: ${AVAIL_GB} GB    需要: ${NEED_GB} GB
+
+挂载点:
+${MOUNTS}
+
+原因：网络卷(Volume)没挂到这个 Pod 上，工作目录落在系统盘。
+办法：① 建 Pod 时挂上 Volume（需同数据中心）
+      ② 或把 Container Disk 直接设成 120 GB，不用网络卷
+      ③ 或设 LCM_WORK=<卷的实际挂载路径>"
+      exit 1
+    fi
 
     # 先做一次占位上传：保证后面全崩时仓库里也有东西
     do_upload >/dev/null 2>&1 || say "首次占位上传失败（不致命，继续）"
