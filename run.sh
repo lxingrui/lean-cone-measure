@@ -19,15 +19,21 @@ LOGS="$APP/logs"
 mkdir -p "$RES" "$LOGS" "$WORK"
 
 # ---------- 可调参数 ----------
-# 环境变量一律带 LCM_ 前缀：RunPod 的 Secrets 是【账号级】的，
-# 用裸名 GH_TOKEN / GH_REPO 会被其它项目的 Pod 默认继承，造成互相干扰。
-# 裸名仍然兼容（若你只跑这一个项目），但 LCM_* 优先。
-TARGET="${LCM_TARGET:-${TARGET:-mathlib}}"                     # mathlib | oai
-OAI_SUBTREE="${LCM_OAI_SUBTREE:-${OAI_SUBTREE:-}}"              # TARGET=oai 时强烈建议指定
-GH_REPO="${LCM_GH_REPO:-${GH_REPO:-lxingrui/lean-cone-measure}}"   # 非机密，给个默认值
-GH_TOKEN="${LCM_GH_TOKEN:-${GH_TOKEN:-}}"                       # 机密，必须显式注入
+# 环境变量带 LCM_ 前缀可避免与其它项目串味（RunPod 的 Secrets 是账号级的）。
+# 同时兼容几种常见命名，按优先级取：
+#   token  : LCM_GH_TOKEN > GITHUB_TOKEN > GH_TOKEN
+#   webhook: LCM_FEISHU_WEBHOOK > FEISHU_WEBHOOK
+GH_TOKEN="${LCM_GH_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
 FEISHU_WEBHOOK="${LCM_FEISHU_WEBHOOK:-${FEISHU_WEBHOOK:-}}"
 FEISHU_SECRET="${LCM_FEISHU_SECRET:-${FEISHU_SECRET:-}}"
+OAI_SUBTREE="${LCM_OAI_SUBTREE:-${OAI_SUBTREE:-}}"
+# TARGET 可从 OAI_SUBTREE 推断：给了子树即视为要测 OAI
+TARGET="${LCM_TARGET:-${TARGET:-$([ -n "$OAI_SUBTREE" ] && echo oai || echo mathlib)}}"
+# 以下都非机密，脚本内有默认值，无需设置
+GH_REPO="${LCM_GH_REPO:-${GH_REPO:-lxingrui/lean-cone-measure}}"
+OAI_FULL="${LCM_OAI_FULL:-${OAI_FULL:-0}}"
+LCM_PUSH_REFS="${LCM_PUSH_REFS:-${PUSH_REFS:-0}}"
+RESULT_BRANCH="${LCM_RESULT_BRANCH:-${RESULT_BRANCH:-results}}"
 LEAN_TOOLCHAIN="${LEAN_TOOLCHAIN:-leanprover/lean4:v4.34.1}"   # 与 OAI 仓库 lean-toolchain 一致
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4.git}"
 # OpenAI 数学仓库（public）。已核对：本地克隆的 .git/config 里 origin 就是这个地址，
@@ -108,7 +114,7 @@ preflight() {
     say "  当前可用磁盘: ${AVAIL_GB} GB"
     say "  作者提示    : lean/README.md 说全量编译可能失败，建议只编译小部分"
     say "────────────────────────────────────────────────"
-    if [ "${OAI_FULL:-0}" != "1" ]; then
+    if [ "$OAI_FULL" != "1" ]; then
       die "拒绝擅自全量编译。确认要跑请加环境变量 OAI_FULL=1；否则请指定 OAI_SUBTREE=OAI/<领域>"
     fi
     if [ "$AVAIL_GB" -lt 110 ]; then
@@ -263,7 +269,7 @@ do_upload() {
   [ -f "$RES/measures.jsonl" ] && [ ! -f "$RES/measures.jsonl.gz" ] && gzip -9 -f "$RES/measures.jsonl" || true
   # refs.tsv（带权图）是中间产物：大领域约 1.9 GB、全量约 4.8 GB，即使 gzip 也不该进 git。
   # 要它就在 Pod 上手取，或设 LCM_PUSH_REFS=1 强行推（小族才建议）。
-  if [ "${LCM_PUSH_REFS:-0}" = "1" ]; then
+  if [ "$LCM_PUSH_REFS" = "1" ]; then
     [ -f "$RES/refs.tsv" ] && gzip -9 -f "$RES/refs.tsv" || true
   else
     say "跳过 refs.tsv（中间产物，避免撑爆仓库）——要它请设 LCM_PUSH_REFS=1"
@@ -272,7 +278,7 @@ do_upload() {
   # 体积守卫：GitHub 单文件 100 MiB 会拒绝，>50 MiB 会告警
   say "上传前体积检查:"
   EXCLUDE=""
-  if ! node "$APP/sizeguard.mjs" "$RES" $([ "${LCM_PUSH_REFS:-0}" = "1" ] && echo --refs); then
+  if ! node "$APP/sizeguard.mjs" "$RES" $([ "$LCM_PUSH_REFS" = "1" ] && echo --refs); then
     EXCLUDE="measures.jsonl.gz"      # 超限则排除最重的那个，保住 summary.json
     say "⚠️ measures 超限，本次只推 summary.json + logs"
   fi
@@ -302,7 +308,7 @@ EOF
   done
   cp -r "$LOGS"/. "$STAGE/logs/" 2>/dev/null || true
 
-  BRANCH="${RESULT_BRANCH:-results}"
+  BRANCH="$RESULT_BRANCH"
   REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
 
   cd "$STAGE"
