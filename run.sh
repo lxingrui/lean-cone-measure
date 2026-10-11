@@ -97,6 +97,45 @@ $(tail -n 12 "$LOGS/$name.log" 2>/dev/null || echo '(无日志)')"
   mark_progress "$name" done
 }
 
+# ---------- 自动关机 ----------
+# 跑完自动关掉 pod，避免空转计费。
+#
+# 机制参考 OpenAI 的 parameter-golf/scripts/pod_selfterm.py：
+#   1) 调 RunPod API 删除 pod（需要 RUNPOD_API_KEY）
+#   2) 失败则 kill 1 —— 杀 PID 1，RunPod 据此停止 pod（不需要任何 key）
+#
+# RUNPOD_POD_ID 由 RunPod 运行时【自动注入】，无需手动设置。
+# 环境变量:
+#   RUNPOD_API_KEY  可选；不设则跳过 API 删除，直接走 kill 1
+#   LCM_SELFTERM    设为 0 可关闭自动关机（调试时有用）
+selfterm() {
+  local need_fallback=1
+  local pod_id="${RUNPOD_POD_ID:-}"
+  local api_key="${RUNPOD_API_KEY:-}"
+
+  if [ "${LCM_SELFTERM:-1}" = "0" ]; then
+    say "LCM_SELFTERM=0，跳过自动关机（pod 继续运行，记得手动删）"
+    return 0
+  fi
+
+  if [ -n "$api_key" ] && [ -n "$pod_id" ]; then
+    say "自动关机：调用 RunPod API 删除 pod $pod_id"
+    local code
+    code=$(curl -sS -o /tmp/runpod_del.txt -w '%{http_code}' --max-time 30 \
+      -X DELETE "https://rest.runpod.io/v1/pods/${pod_id}" \
+      -H "Authorization: Bearer ${api_key}" 2>/dev/null || echo 000)
+    say "  API 返回 HTTP $code  $(head -c 200 /tmp/runpod_del.txt 2>/dev/null)"
+    case "$code" in 200|204) need_fallback=0 ;; esac
+  else
+    say "自动关机：未设 RUNPOD_API_KEY（或 POD_ID 为空），走 kill 1 兜底"
+  fi
+
+  [ $need_fallback -ne 0 ] && say "自动关机：kill 1（让容器主进程退出）"
+  sync
+  sleep 3
+  kill 1 2>/dev/null || true
+}
+
 # ---------- 环境自检 ----------
 preflight() {
   say "环境: ${VCPU} vCPU, $(free -g | awk '/^Mem:/{print $2}') GB RAM, 容器盘 $(df -BG / | awk 'NR==2{print $2}')"
@@ -339,6 +378,20 @@ EOF
 
 # ---------- 调度 ----------
 START_EPOCH=$(date +%s)
+
+# 看门狗：即使主流程卡死（编译挂住、网络卡住），到点也强制关机。
+# 默认 14 小时，可用 LCM_DEADLINE_HOURS 调整。设 0 关闭。
+DEADLINE_H="${LCM_DEADLINE_HOURS:-14}"
+if [ "$DEADLINE_H" != "0" ] && [ "${LCM_SELFTERM:-1}" != "0" ]; then
+  ( sleep $(( DEADLINE_H * 3600 ))
+    echo "[看门狗] 超过 ${DEADLINE_H}h 仍未结束，强制关机" >> "$LOGS/watchdog.log"
+    RUNPOD_API_KEY="${RUNPOD_API_KEY:-}" RUNPOD_POD_ID="${RUNPOD_POD_ID:-}" \
+      LCM_SELFTERM=1 bash -c "$(declare -f selfterm); selfterm" >> "$LOGS/watchdog.log" 2>&1
+  ) &
+  WATCHDOG_PID=$!
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] 看门狗已武装: ${DEADLINE_H}h 后强制关机 (pid $WATCHDOG_PID)" | tee -a "$LOGS/watchdog.log"
+fi
+
 preflight
 
 case "$PHASE" in
@@ -352,7 +405,7 @@ case "$PHASE" in
       "目标: ${TARGET}${OAI_SUBTREE:+ / $OAI_SUBTREE}
 主机: ${VCPU} vCPU / $(free -g | awk '/^Mem:/{print $2}') GB RAM / 盘 $(df -BG / | awk 'NR==2{print $2}')
 并发: JOBS=$JOBS
-Max Runtime 到点会被平台强杀 —— 本通知只表示已启动"
+自动关机: 跑完即关；卡死则 ${DEADLINE_H}h 后强制关"
 
     # 先做一次占位上传：保证后面全崩时仓库里也有东西
     do_upload >/dev/null 2>&1 || say "首次占位上传失败（不致命，继续）"
@@ -366,14 +419,20 @@ Max Runtime 到点会被平台强杀 —— 本通知只表示已启动"
       notify ok "lean-cone-measure 全部完成" \
         "目标: ${TARGET}${OAI_SUBTREE:+ / $OAI_SUBTREE}
 总耗时: $(fmt_dur "$(elapsed)")
-结果: https://github.com/${GH_REPO:-?}/tree/${RESULT_BRANCH:-results}" \
+结果: https://github.com/${GH_REPO:-?}/tree/${RESULT_BRANCH:-results}
+pod 即将自动关机" \
         "$RES/summary.json"
     else
       notify fail "lean-cone-measure 未完成" \
         "目标: ${TARGET}${OAI_SUBTREE:+ / $OAI_SUBTREE}
 已用: $(fmt_dur "$(elapsed)")
-日志: https://github.com/${GH_REPO:-?}/tree/${RESULT_BRANCH:-results}/logs"
+日志: https://github.com/${GH_REPO:-?}/tree/${RESULT_BRANCH:-results}/logs
+pod 即将自动关机（失败也关，不空转计费）"
     fi
+
+    # 收工关机：无论成功失败都关，避免空转
+    [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
+    selfterm
     exit $FAILED
     ;;
   *) die "未知阶段: $PHASE（可用: toolchain|deps|build|measure|upload|all）" ;;
