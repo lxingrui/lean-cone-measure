@@ -1,0 +1,35 @@
+# 凭证：绝不提交。只通过运行时环境变量注入（见 RUNBOOK §3）
+.env
+.env.local
+.env.*.local
+secrets*
+*.token
+*.pem
+
+# 但示例文件要提交（里面的值全是占位符）
+!.env.example
+
+# 运行产物（结果走独立的 results 分支，不进 main）
+results/
+logs/
+*.tsv
+*.tsv.gz
+*.jsonl
+
+# 运行时克隆的目标库（很大，不入库）
+work/
+mathlib4/
+oai/
+
+# 工具链与构建缓存
+.lake/
+.elan/
+node_modules/
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
