@@ -17,17 +17,31 @@ APP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------- 工作目录：必须放大盘，不能放系统盘 ----------
 # RunPod 的磁盘分两类：
 #   Container Disk  = 系统盘，通常只有 10 GB —— 放不下 Lean 编译产物
-#   Volume（网络卷）= 挂在 /workspace，容量大（本例 80 GB）
-# 所以所有重物（源码、olean、中间数据）一律放 /workspace。
-# 探测顺序：显式 LCM_WORK > /workspace（非空或可写）> /work > $APP/work
+#   Volume（网络卷）= 通常挂在 /workspace，容量大
+# 注意：/workspace 可能【只是系统盘上的一个普通目录】（卷没真挂上），
+# 所以必须比较设备号确认它是独立文件系统，否则等于还是在系统盘里干活。
+dev_of() { stat -c %d "$1" 2>/dev/null || echo ""; }
+
 if [ -n "${LCM_WORK:-${WORK:-}}" ]; then
   WORK="${LCM_WORK:-${WORK}}"
-elif [ -d /workspace ]; then
-  WORK=/workspace
-elif [ -d /work ]; then
-  WORK=/work
+  WORK_SRC="显式指定"
 else
-  WORK="$APP/work"
+  ROOT_DEV="$(dev_of /)"
+  WORK=""
+  for cand in /workspace /runpod-volume /workspace/lean; do
+    if [ -d "$cand" ] && [ "$(dev_of "$cand")" != "$ROOT_DEV" ]; then
+      WORK="$cand"; WORK_SRC="自动探测（独立挂载点）"; break
+    fi
+  done
+  if [ -z "$WORK" ]; then
+    # 没有独立挂载点：退而求其次，看哪个目录所在文件系统剩余空间最大
+    for cand in /workspace /work; do
+      [ -d "$cand" ] || mkdir -p "$cand" 2>/dev/null || continue
+      WORK="$cand"; WORK_SRC="自动探测（⚠️ 与系统盘同一文件系统，不是独立卷）"; break
+    done
+  fi
+  WORK="${WORK:-$APP/work}"
+  WORK_SRC="${WORK_SRC:-回退到脚本目录}"
 fi
 mkdir -p "$WORK" 2>/dev/null || true
 
@@ -182,12 +196,34 @@ selfterm() {
 
 # ---------- 环境自检 ----------
 preflight() {
-  say "环境: ${VCPU} vCPU, $(free -g | awk '/^Mem:/{print $2}') GB RAM"
-  say "工作目录: $WORK"
-  df -BG / "$WORK" 2>/dev/null | awk 'NR>1{printf "  %-14s 总量 %s  可用 %s  挂载 %s\n", ($6=="/"?"系统盘":"工作盘"), $2, $4, $6}'
-  AVAIL_GB=$(df -BG "$WORK" | awk 'NR==2{gsub("G","",$4); print $4}')
+  say "环境: ${VCPU} vCPU, ${MEM_GB} GB RAM"
+  say "工作目录: $WORK   （来源: ${WORK_SRC:-?}）"
+  say "── 所有挂载点（排查网络卷挂到哪了，看这里）──"
+  df -BG 2>/dev/null | awk 'NR==1{next} {printf "  %-22s 总量 %-6s 已用 %-6s 可用 %-6s 使用率 %-5s %s\n", $1, $2, $3, $4, $5, $6}'
+  say "────────────────────────────────────────────────"
+
+  AVAIL_GB=$(df -BG "$WORK" 2>/dev/null | awk 'NR==2{gsub("G","",$4); print $4}')
   ROOT_AVAIL_GB=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+  AVAIL_GB="${AVAIL_GB:-0}"; ROOT_AVAIL_GB="${ROOT_AVAIL_GB:-0}"
   say "可用空间: 工作盘 ${AVAIL_GB} GB / 系统盘 ${ROOT_AVAIL_GB} GB"
+
+  # 关键守卫：工作盘必须够大。mathlib+oai 两个目标约需 40 GB。
+  NEED_GB=40
+  case " $TARGETS " in *" oai "*) [ "$OAI_FULL" = "1" ] && NEED_GB=110 ;; esac
+  if [ "$AVAIL_GB" -lt "$NEED_GB" ]; then
+    say "❌ 工作盘只有 ${AVAIL_GB} GB，本次需要约 ${NEED_GB} GB"
+    say ""
+    say "  最可能的原因：RunPod 的【网络卷(Volume)】没有挂到这个 Pod 上。"
+    say "  检查顺序："
+    say "   1. 创建 Pod 时是否选了 Volume，且挂载路径是 /workspace"
+    say "   2. Volume 必须在【同一个数据中心】才能挂到该 Pod"
+    say "   3. 上面「所有挂载点」列表里应出现一个几十~上百 G 的卷"
+    say "   4. 若卷挂在别处，设环境变量 LCM_WORK=<那个路径> 即可"
+    say "  当前工作目录 $WORK 落在系统盘上，继续跑只会再报"
+    say "  'No space left on device (os error 28)'。"
+    die "工作盘空间不足，拒绝继续（避免白白写满系统盘）"
+  fi
+
   say "目标: $TARGETS${OAI_SUBTREE:+   (oai 子树=$OAI_SUBTREE)}"
   if [ "${JOBS_AUTO:-0}" = "1" ]; then
     say "并发 JOBS=$JOBS（自动：${VCPU} vCPU / ${MEM_GB} GB 内存 → 取 CPU 与内存上限的较小值；可用 JOBS=N 覆盖）"
