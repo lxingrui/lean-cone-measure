@@ -19,8 +19,15 @@ LOGS="$APP/logs"
 mkdir -p "$RES" "$LOGS" "$WORK"
 
 # ---------- 可调参数 ----------
-TARGET="${TARGET:-mathlib}"                     # mathlib | oai
-OAI_SUBTREE="${OAI_SUBTREE:-}"                  # TARGET=oai 时强烈建议指定，例如 OAI/Analysis/Fourier
+# 环境变量一律带 LCM_ 前缀：RunPod 的 Secrets 是【账号级】的，
+# 用裸名 GH_TOKEN / GH_REPO 会被其它项目的 Pod 默认继承，造成互相干扰。
+# 裸名仍然兼容（若你只跑这一个项目），但 LCM_* 优先。
+TARGET="${LCM_TARGET:-${TARGET:-mathlib}}"                     # mathlib | oai
+OAI_SUBTREE="${LCM_OAI_SUBTREE:-${OAI_SUBTREE:-}}"              # TARGET=oai 时强烈建议指定
+GH_REPO="${LCM_GH_REPO:-${GH_REPO:-lxingrui/lean-cone-measure}}"   # 非机密，给个默认值
+GH_TOKEN="${LCM_GH_TOKEN:-${GH_TOKEN:-}}"                       # 机密，必须显式注入
+FEISHU_WEBHOOK="${LCM_FEISHU_WEBHOOK:-${FEISHU_WEBHOOK:-}}"
+FEISHU_SECRET="${LCM_FEISHU_SECRET:-${FEISHU_SECRET:-}}"
 LEAN_TOOLCHAIN="${LEAN_TOOLCHAIN:-leanprover/lean4:v4.34.1}"   # 与 OAI 仓库 lean-toolchain 一致
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4.git}"
 # OpenAI 数学仓库（public）。已核对：本地克隆的 .git/config 里 origin 就是这个地址，
@@ -49,12 +56,24 @@ notify() {
   node "$APP/notify.mjs" "$status" "$title" "$body" "$detail" 2>&1 | tail -3 || true
 }
 
+# 阶段留痕：把进度写进 results/，即使 Pod 被 Max Runtime 强杀（容器盘一起消失），
+# 只要之前某次 upload 成功过，仓库里就有"最后推进到哪一步"的记录。
+mark_progress() {
+  local name="$1" state="$2"
+  mkdir -p "$RES"
+  printf '{"stage":"%s","state":"%s","at":"%s","elapsed_seconds":%s}\n' \
+    "$name" "$state" "$(ts)" "$(elapsed)" > "$RES/progress.json"
+  # 尽力而为地上传，失败不影响主流程
+  do_upload >/dev/null 2>&1 || true
+}
+
 run_logged() {
   local name="$1"; shift
   local t0; t0=$(date +%s)
   say "==> $name"
   if ! "$@" 2>&1 | tee -a "$LOGS/$name.log"; then
     local d=$(( $(date +%s) - t0 ))
+    mark_progress "$name" failed
     notify fail "lean-cone-measure 失败" \
       "阶段: $name
 耗时: $(fmt_dur $d)（累计 $(fmt_dur "$(elapsed)")）
@@ -69,6 +88,7 @@ $(tail -n 12 "$LOGS/$name.log" 2>/dev/null || echo '(无日志)')"
   notify ok "阶段完成: $name" \
     "耗时: $(fmt_dur $d)（累计 $(fmt_dur "$(elapsed)")）
 目标: ${TARGET}${OAI_SUBTREE:+ $OAI_SUBTREE}"
+  mark_progress "$name" done
 }
 
 # ---------- 环境自检 ----------
@@ -77,10 +97,24 @@ preflight() {
   df -BG / | awk 'NR==2{print "     可用磁盘: "$4}'
   AVAIL_GB=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
   say "并发 JOBS=$JOBS（可用 JOBS=N 覆盖）"
+
+  # 全量编译 OAI：不禁止，但必须显式确认 + 给出真实数字
   if [ "$TARGET" = "oai" ] && [ -z "$OAI_SUBTREE" ]; then
-    say "⚠️  TARGET=oai 但未指定 OAI_SUBTREE —— 会尝试全量编译"
-    say "⚠️  按 65x 外推约需 100 GB，且作者自己在 lean/README.md 里说全量编译可能失败"
-    if [ "$AVAIL_GB" -lt 120 ]; then die "磁盘不足(${AVAIL_GB}G)，拒绝全量编译"; fi
+    say "────────────────────────────────────────────────"
+    say "目标 = 整个 OAI 库（未指定 OAI_SUBTREE）"
+    say "  源码        : ~1.5 GB / 122,000 个 .lean 文件"
+    say "  编译产物估算: 80–100 GB（按本机 mathlib 的 65x 比例外推）"
+    say "  预计耗时    : 10–25 小时（8 vCPU）"
+    say "  当前可用磁盘: ${AVAIL_GB} GB"
+    say "  作者提示    : lean/README.md 说全量编译可能失败，建议只编译小部分"
+    say "────────────────────────────────────────────────"
+    if [ "${OAI_FULL:-0}" != "1" ]; then
+      die "拒绝擅自全量编译。确认要跑请加环境变量 OAI_FULL=1；否则请指定 OAI_SUBTREE=OAI/<领域>"
+    fi
+    if [ "$AVAIL_GB" -lt 110 ]; then
+      die "磁盘 ${AVAIL_GB}G 不足（全量编译需 80–100 GB 产物）。请加大容器盘，或改用 OAI_SUBTREE"
+    fi
+    say "OAI_FULL=1 已确认，继续全量编译"
   fi
 }
 
@@ -201,7 +235,6 @@ do_upload() {
   if [ "${SKIP_UPLOAD:-0}" = "1" ]; then say "SKIP_UPLOAD=1，跳过上传"; return 0; fi
   [ -n "${GH_TOKEN:-}" ] || die "缺少 GH_TOKEN（只调试请设 SKIP_UPLOAD=1）"
   [ -n "${GH_REPO:-}" ] || die "缺少 GH_REPO"
-
   node -e '
     const fs=require("fs"),os=require("os"),cp=require("child_process");
     const sh=c=>{try{return cp.execSync(c,{stdio:["ignore","pipe","ignore"]}).toString().trim()}catch{return null}};
