@@ -257,7 +257,23 @@ do_upload() {
       "$TARGET" "${OAI_SUBTREE:-}" "$(ts)" > "$RES/meta.json"
   }
 
-  [ -f "$RES/refs.tsv" ] && gzip -9 -f "$RES/refs.tsv" || true
+  # 压缩要上传的大文件
+  [ -f "$RES/measures.jsonl" ] && [ ! -f "$RES/measures.jsonl.gz" ] && gzip -9 -f "$RES/measures.jsonl" || true
+  # refs.tsv（带权图）是中间产物：大领域约 1.9 GB、全量约 4.8 GB，即使 gzip 也不该进 git。
+  # 要它就在 Pod 上手取，或设 LCM_PUSH_REFS=1 强行推（小族才建议）。
+  if [ "${LCM_PUSH_REFS:-0}" = "1" ]; then
+    [ -f "$RES/refs.tsv" ] && gzip -9 -f "$RES/refs.tsv" || true
+  else
+    say "跳过 refs.tsv（中间产物，避免撑爆仓库）——要它请设 LCM_PUSH_REFS=1"
+  fi
+
+  # 体积守卫：GitHub 单文件 100 MiB 会拒绝，>50 MiB 会告警
+  say "上传前体积检查:"
+  EXCLUDE=""
+  if ! node "$APP/sizeguard.mjs" "$RES" $([ "${LCM_PUSH_REFS:-0}" = "1" ] && echo --refs); then
+    EXCLUDE="measures.jsonl.gz"      # 超限则排除最重的那个，保住 summary.json
+    say "⚠️ measures 超限，本次只推 summary.json + logs"
+  fi
 
   cd "$APP"
   git init -q 2>/dev/null || true
@@ -270,24 +286,45 @@ do_upload() {
 !logs/
 !logs/**
 EOF
+  # 暂存目录：只放要推的文件（超限的排除在外）
+  STAGE="/tmp/stage"
+  rm -rf "$STAGE"; mkdir -p "$STAGE/results" "$STAGE/logs"
+  for f in "$RES"/*; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    if [ -n "$EXCLUDE" ] && [ "$base" = "$EXCLUDE" ]; then
+      say "  排除 $base（超体积上限，仅留在容器内）"
+      continue
+    fi
+    cp -r "$f" "$STAGE/results/" 2>/dev/null || true
+  done
+  cp -r "$LOGS"/. "$STAGE/logs/" 2>/dev/null || true
+
   BRANCH="${RESULT_BRANCH:-results}"
   REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
 
-  git add -f results logs 2>/dev/null || true
+  cd "$STAGE"
+  git init -q
+  git config user.email "measure-bot@localhost"
+  git config user.name "lean-cone-measure bot"
+  git checkout -q -b "$BRANCH"
+
   if git ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
-    say "分支 $BRANCH 已存在，追加提交"
-    git fetch -q --depth 1 "$REMOTE" "$BRANCH"
-    git checkout -q -B "$BRANCH" FETCH_HEAD
-    mkdir -p results logs
-    cp -r "$RES"/. results/ 2>/dev/null || true
-    cp -r "$LOGS"/. logs/ 2>/dev/null || true
-    git add -f results logs
-  else
-    say "创建分支 $BRANCH"
-    git checkout -q -b "$BRANCH"
+    say "分支 $BRANCH 已存在，合并历史以保留之前的进度记录"
+    mkdir -p /tmp/prev
+    if git -C /tmp/prev init -q 2>/dev/null &&
+       git -C /tmp/prev remote add origin "$REMOTE" 2>/dev/null || true; then
+      git -C /tmp/prev fetch -q --depth 1 origin "$BRANCH" 2>/dev/null &&
+        git -C /tmp/prev checkout -q FETCH_HEAD 2>/dev/null || true
+      # 只补不覆盖：把上一次的记录加进来，本次结果优先
+      [ -d /tmp/prev/results ] && cp -rn /tmp/prev/results/. "$STAGE/results/" 2>/dev/null || true
+      [ -d /tmp/prev/logs ]    && cp -rn /tmp/prev/logs/.    "$STAGE/logs/"    2>/dev/null || true
+    fi
   fi
+
+  git add -f results logs 2>/dev/null || true
   git commit -q -m "measure: ${TARGET}${OAI_SUBTREE:+ $OAI_SUBTREE} @ $(ts)" || say "无变更可提交"
-  git push -q "$REMOTE" "$BRANCH"
+  git push -q --force "$REMOTE" "$BRANCH"
   say "已推送到 ${GH_REPO} 的 ${BRANCH} 分支"
   ls -la "$RES"
 }
