@@ -45,7 +45,7 @@ TARGET="${TARGETS%% *}"
 GH_REPO="${LCM_GH_REPO:-${GH_REPO:-lxingrui/lean-cone-measure}}"
 OAI_FULL="${LCM_OAI_FULL:-${OAI_FULL:-0}}"
 LCM_PUSH_REFS="${LCM_PUSH_REFS:-${PUSH_REFS:-0}}"
-RESULT_BRANCH="${LCM_RESULT_BRANCH:-${RESULT_BRANCH:-results}}"
+# 结果分支在「调度」一节按运行实例唯一生成（避免并发实例互相覆盖）
 # 本次运行大约需要多少工作空间（探盘与守卫共用）
 # 估算依据（mathlib+oai 两个目标）：
 #   mathlib 缓存解包峰值 ~7G + mathlib olean ~7G + OAI 源码 1.5G
@@ -181,6 +181,34 @@ selfterm() {
   sleep 3
   kill 1 2>/dev/null || true
 }
+
+# ---------- 实例锁：同一台机器只允许一个 run.sh 在跑 ----------
+# 之前没有这个，导致 Docker Command 的实例和 SSH 里手动起的实例同时跑：
+# 两边写同一份 /work/ 文件、又都 --force 推同一个 results 分支，互相覆盖。
+LOCK_DIR="/tmp/lean-cone-measure.lock"
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "$$" > "$LOCK_DIR/pid"
+    hostname > "$LOCK_DIR/host"
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$LOCK_DIR/started"
+    return 0
+  fi
+  # 锁已存在：看持有者是否还活着
+  local other; other="$(cat "$LOCK_DIR/pid" 2>/dev/null || echo '')"
+  if [ -n "$other" ] && [ "$other" != "$$" ] && kill -0 "$other" 2>/dev/null; then
+    local ostart; ostart="$(cat "$LOCK_DIR/started" 2>/dev/null || echo '?')"
+    die "已有实例在运行（pid=$other，启动于 $ostart）。
+    同一台机器同时跑两个会互相覆盖产物并冲突推送。
+    要强行接管：kill $other 然后 rm -rf $LOCK_DIR"
+  fi
+  # 陈旧锁（持有者已死）：接管
+  say "⚠️ 发现陈旧实例锁（pid=$other 已不存在），接管"
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" 2>/dev/null || die "无法获取实例锁 $LOCK_DIR"
+  echo "$$" > "$LOCK_DIR/pid"
+  date -u +"%Y-%m-%dT%H:%M:%SZ" > "$LOCK_DIR/started"
+}
+release_lock() { [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK_DIR" || true; }
 
 # ---------- 环境自检 ----------
 preflight() {
@@ -470,7 +498,6 @@ EOF
 
   BRANCH="$RESULT_BRANCH"
   REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
-
   cd "$STAGE"
   git init -q
   git config user.email "measure-bot@localhost"
@@ -499,6 +526,15 @@ EOF
 
 # ---------- 调度 ----------
 START_EPOCH=$(date +%s)
+acquire_lock
+trap 'release_lock' EXIT INT TERM
+
+# 分支隔离：每次运行一个独立分支，避免并发实例互相 --force 覆盖。
+#   LCM_RESULT_BRANCH 显式指定则用它（不隔离，后果自负）
+#   否则 = results-<主机名>-<启动时间戳>
+HOST_TAG="$(hostname 2>/dev/null | tr -cd 'a-zA-Z0-9' | head -c 12)"
+[ -z "$HOST_TAG" ] && HOST_TAG="pod"
+RESULT_BRANCH="${LCM_RESULT_BRANCH:-results-${HOST_TAG}-$(date -u +%m%d-%H%M%S)}"
 
 # 看门狗：即使主流程卡死（编译挂住、网络卡住），到点也强制关机。
 # 默认 24 小时（多目标 + 低配机器的余量），可用 LCM_DEADLINE_HOURS 调整。设 0 关闭。
