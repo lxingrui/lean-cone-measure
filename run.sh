@@ -340,19 +340,21 @@ do_build() {
     cd "$WORK/mathlib4"
     say "[$t] 拉 mathlib 预编译缓存（失败则要自行编译，1–3 小时）"
     lake exe cache get || say "[$t] ⚠️ 缓存拉取失败，将自行编译"
-    say "[$t] 编译 Mathlib 根模块，-j $JOBS"
-    lake build Mathlib -j "$JOBS"
+    # 注意：lake build 【没有】 -j 选项（实测 v4.34.1：unknown short option '-j'）
+    # 并发由 LEAN_NUM_THREADS 控制
+    say "[$t] 编译 Mathlib 根模块（LEAN_NUM_THREADS=$JOBS）"
+    LEAN_NUM_THREADS="$JOBS" lake build Mathlib || die "[$t] 编译失败（见上）"
   else
     cd "$WORK/oai/lean"
     say "[$t] 先确保 pinned mathlib 的缓存落地"
     ( cd .lake/packages/mathlib && lake exe cache get ) || say "[$t] ⚠️ mathlib 缓存失败，将自行编译"
     if [ -n "$OAI_SUBTREE" ]; then
-      local TGT; TGT="$(echo "$OAI_SUBTREE" | sed 's#/#.#g')"
-      say "[$t] 只编译子树 $TGT，-j $JOBS"
-      lake build "$TGT" -j "$JOBS"
+      local TGT; TGT="$(echo "$OAI_SUBTREE" | sed 's|/|.|g')"
+      say "[$t] 只编译子树 $TGT（LEAN_NUM_THREADS=$JOBS）"
+      LEAN_NUM_THREADS="$JOBS" lake build "$TGT" || die "[$t] 编译失败（见上）"
     else
-      say "[$t] 编译整个 OAI 库，-j $JOBS（不推荐）"
-      lake build OAI -j "$JOBS"
+      say "[$t] 编译整个 OAI 库（LEAN_NUM_THREADS=$JOBS，不推荐）"
+      LEAN_NUM_THREADS="$JOBS" lake build OAI || die "[$t] 编译失败（见上）"
     fi
   fi
   say "[$t] build 完成，产物: $(du -sh "$PWD/.lake/build" 2>/dev/null | cut -f1)"
@@ -371,14 +373,15 @@ do_measure() {
     PROJ="$WORK/mathlib4"; ROOT_MODULE="Mathlib"
   else
     PROJ="$WORK/oai/lean"; ROOT_MODULE="OAI"
-    [ -n "$OAI_SUBTREE" ] && ROOT_MODULE="$(echo "$OAI_SUBTREE" | sed 's#/#.#g')"
+    [ -n "$OAI_SUBTREE" ] && ROOT_MODULE="$(echo "$OAI_SUBTREE" | sed 's|/|.|g')"
   fi
   say "[$t] 抽取 elaboration 后的 .const 引用（根模块 $ROOT_MODULE）"
   cd "$PROJ"
-  cp "$APP/measure.lean" "$PROJ/MeasureRefs.lean"
-  sed -i "s#^import Mathlib\$#import $ROOT_MODULE#" "$PROJ/MeasureRefs.lean"
-  sed -i "s#OUT_PATH_PLACEHOLDER#$TSV#" "$PROJ/MeasureRefs.lean"
-  sed -i "s#\`Mathlib\$\#\`$ROOT_MODULE#" "$PROJ/MeasureRefs.lean"
+  # 用 node 做占位符替换：模板里有 Lean 的反引号语法 `Mathlib，
+  # 三层转义（反引号/sed/shell）用 sed 必踩坑，已实测报 unterminated 's' command
+  node "$APP/subst_template.mjs" "$APP/measure.lean" "$PROJ/MeasureRefs.lean" "$ROOT_MODULE" "$TSV" \
+    || die "[$t] 模板替换失败"
+  say "[$t] 开始 elaboration 抽取（可能较久）"
   lake env lean "$PROJ/MeasureRefs.lean"
   [ -s "$TSV" ] || die "[$t] refs.tsv 为空，抽取失败"
 
