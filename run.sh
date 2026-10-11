@@ -36,12 +36,39 @@ ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 say() { echo "[$(ts)] $*"; }
 die() { echo "[$(ts)] 失败: $*" >&2; exit 1; }
 
+# 距脚本启动的秒数
+elapsed() { echo $(( $(date +%s) - START_EPOCH )); }
+fmt_dur() { local s=$1; printf '%dm%02ds' $((s/60)) $((s%60)); }
+
+# ---------- 飞书 / 通用 webhook 通知 ----------
+# 没配 FEISHU_WEBHOOK / WEBHOOK_URL 时静默跳过；通知失败绝不影响主流程。
+notify() {
+  local status="$1" title="$2" body="$3" detail="${4:-}"
+  [ -n "${FEISHU_WEBHOOK:-}${WEBHOOK_URL:-}" ] || return 0
+  command -v node >/dev/null 2>&1 || { say "（无 node，跳过通知）"; return 0; }
+  node "$APP/notify.mjs" "$status" "$title" "$body" "$detail" 2>&1 | tail -3 || true
+}
+
 run_logged() {
   local name="$1"; shift
+  local t0; t0=$(date +%s)
   say "==> $name"
   if ! "$@" 2>&1 | tee -a "$LOGS/$name.log"; then
+    local d=$(( $(date +%s) - t0 ))
+    notify fail "lean-cone-measure 失败" \
+      "阶段: $name
+耗时: $(fmt_dur $d)（累计 $(fmt_dur "$(elapsed)")）
+目标: ${TARGET}${OAI_SUBTREE:+ $OAI_SUBTREE}
+主机: $(hostname)
+
+最近日志:
+$(tail -n 12 "$LOGS/$name.log" 2>/dev/null || echo '(无日志)')"
     die "$name 阶段失败，详见 logs/$name.log"
   fi
+  local d=$(( $(date +%s) - t0 ))
+  notify ok "阶段完成: $name" \
+    "耗时: $(fmt_dur $d)（累计 $(fmt_dur "$(elapsed)")）
+目标: ${TARGET}${OAI_SUBTREE:+ $OAI_SUBTREE}"
 }
 
 # ---------- 环境自检 ----------
@@ -233,6 +260,7 @@ EOF
 }
 
 # ---------- 调度 ----------
+START_EPOCH=$(date +%s)
 preflight
 
 case "$PHASE" in
@@ -242,13 +270,32 @@ case "$PHASE" in
   measure)   run_logged measure   do_measure ;;
   upload)    run_logged upload    do_upload ;;
   all)
-    # 关键顺序：**先上传一次空壳**，确保就算后面全崩，仓库里也有 logs 与 meta
+    notify start "lean-cone-measure 启动" \
+      "目标: ${TARGET}${OAI_SUBTREE:+ / $OAI_SUBTREE}
+主机: ${VCPU} vCPU / $(free -g | awk '/^Mem:/{print $2}') GB RAM / 盘 $(df -BG / | awk 'NR==2{print $2}')
+并发: JOBS=$JOBS
+Max Runtime 到点会被平台强杀 —— 本通知只表示已启动"
+
+    # 先做一次占位上传：保证后面全崩时仓库里也有东西
     do_upload >/dev/null 2>&1 || say "首次占位上传失败（不致命，继续）"
     FAILED=0
     for st in toolchain deps build measure; do
       if ! run_logged "$st" "do_$st"; then FAILED=1; break; fi
     done
     do_upload || say "上传阶段也失败了"
+
+    if [ $FAILED -eq 0 ]; then
+      notify ok "lean-cone-measure 全部完成" \
+        "目标: ${TARGET}${OAI_SUBTREE:+ / $OAI_SUBTREE}
+总耗时: $(fmt_dur "$(elapsed)")
+结果: https://github.com/${GH_REPO:-?}/tree/${RESULT_BRANCH:-results}" \
+        "$RES/summary.json"
+    else
+      notify fail "lean-cone-measure 未完成" \
+        "目标: ${TARGET}${OAI_SUBTREE:+ / $OAI_SUBTREE}
+已用: $(fmt_dur "$(elapsed)")
+日志: https://github.com/${GH_REPO:-?}/tree/${RESULT_BRANCH:-results}/logs"
+    fi
     exit $FAILED
     ;;
   *) die "未知阶段: $PHASE（可用: toolchain|deps|build|measure|upload|all）" ;;

@@ -138,14 +138,48 @@ bash -c "apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/
 **环境变量示例**：
 
 ```
-GH_TOKEN      = ghp_...（Fine-grained，1 天）
-GH_REPO       = <你>/<仓库>
-TARGET        = oai
-OAI_SUBTREE   = OAI/Analysis/Fourier
-JOBS          = 6
+GH_TOKEN        = github_pat_...（Fine-grained，7 天）
+GH_REPO         = lxingrui/lean-cone-measure
+FEISHU_WEBHOOK  = https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+TARGET          = oai
+OAI_SUBTREE     = OAI/Analysis/Fourier
+JOBS            = 6
 ```
 
-### 4.3 先干跑一次（强烈建议）
+### 4.3 飞书机器人通知（可选，但强烈建议）
+
+**为什么建议**：`Max Runtime` 到点会把 Pod 强杀，**那时容器盘一起消失、日志也没了**。
+有推送的话，至少你知道它是正常跑完还是被杀了。
+
+**配置步骤**：
+
+1. 打开你要接收通知的飞书群
+2. **设置** → **群机器人** → **添加机器人** → 选 **自定义机器人**
+3. 起个名字（如 `lean-measure`），**安全设置**建议勾 **自定义关键词**，填 `lean-cone-measure`
+   （不勾也行，但不勾意味着任何知道该 URL 的人都能往这个群发消息）
+4. 复制 **Webhook 地址**（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/<uuid>`）
+5. 填进 Pod 的 **`FEISHU_WEBHOOK`** 环境变量
+
+**会收到 5 类消息**：
+
+| 时机 | 消息 |
+|---|---|
+| 启动 | 🚀 目标、主机规格、并发数（同时提醒"Max Runtime 到点会被强杀"） |
+| 每阶段完成 | ✅ 阶段名 + 该阶段耗时 + 累计耗时 |
+| 阶段失败 | ❌ 阶段名 + 耗时 + **最近 12 行日志** |
+| 全部完成 | ✅ 总耗时 + 结果链接 + **从 `summary.json` 提取的关键数字**（斜率、r、3σ、离群数） |
+| 未完成 | ❌ 已用时间 + 日志链接 |
+
+**企业微信机器人也能用**：把 webhook 填到 `WEBHOOK_URL` 即可（脚本会自动退回它的消息格式）。
+
+**两个实现细节**：
+
+- **通知失败绝不影响主流程。** 网络不通、URL 错、飞书限流 —— 都只打印一行错误，退出码仍是 0。
+  已实测：故意指向一个不存在的地址，`run.sh` 照常继续。
+- **webhook URL 是凭证**，和 `GH_TOKEN` 一样只从环境变量读，不进仓库。
+  仓库里只有占位符 `REPLACE_WITH_YOUR_HOOK_ID`。
+
+### 4.4 先干跑一次（强烈建议）
 
 第一次把 `SKIP_UPLOAD=1` 加上、`TARGET=mathlib`、`Max Runtime` 设 3h，
 只验证 toolchain + deps 两个阶段能不能过。**这两步过了，后面基本就稳了。**
