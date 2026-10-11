@@ -227,6 +227,8 @@ do_measure() {
 
   say "后处理：算 depth / unwrapped / wrapped"
   node "$APP/post.mjs" "$TSV" "$RES"
+  say "汇总成可喂 AI 的报告"
+  node "$APP/build_report.mjs" "$RES/measures.jsonl" "$RES" "${TARGET}${OAI_SUBTREE:+ $OAI_SUBTREE}" || say "⚠️ 报告生成失败（不影响 measures.jsonl）"
   say "measure 阶段完成"
 }
 

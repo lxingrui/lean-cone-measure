@@ -14,7 +14,7 @@ const WITH_REFS = process.argv.includes('--refs');
 const WARN = 50 * 1024 * 1024;    // 50 MiB：告警
 const HARD = 95 * 1024 * 1024;    // 95 MiB：留给 GitHub 的 100 MiB 一点余量
 
-const targets = ['summary.json', 'measures.jsonl', 'measures.jsonl.gz', 'refs.tsv', 'refs.tsv.gz', 'meta.json', 'progress.json'];
+const targets = ['report.md', 'stats.json', 'depth_stats.csv', 'outliers.csv', 'module_clusters.csv', 'summary.json', 'measures.jsonl', 'measures.jsonl.gz', 'refs.tsv', 'refs.tsv.gz', 'meta.json', 'progress.json'];
 
 let mustExclude = [];
 let warned = [];
