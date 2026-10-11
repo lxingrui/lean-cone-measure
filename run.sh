@@ -44,19 +44,16 @@ mkdir -p "$RES" "$LOGS"
 GH_TOKEN="${LCM_GH_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
 FEISHU_WEBHOOK="${LCM_FEISHU_WEBHOOK:-${FEISHU_WEBHOOK:-}}"
 FEISHU_SECRET="${LCM_FEISHU_SECRET:-${FEISHU_SECRET:-}}"
-OAI_SUBTREE="${LCM_OAI_SUBTREE:-${OAI_SUBTREE:-}}"
-# 要跑哪些目标。支持多目标顺序跑，逗号/空格分隔，例如 "mathlib,oai"。
-#   LCM_TARGETS="mathlib,oai"   → 两个都跑
-#   LCM_TARGET（单数）仍兼容，等价于 LCM_TARGETS="<那个>"
-# 若给了 OAI_SUBTREE 却没指定任何目标，默认只跑 oai（避免误跑全量 mathlib）
+OAI_SUBTREE="${LCM_OAI_SUBTREE:-${OAI_SUBTREE:-OAI/Analysis/Crouzeix}}"
+# 要跑哪些目标。支持多目标顺序跑，逗号/空格分隔。
+#   默认 "mathlib,oai" —— 开机就两个都跑，不需要任何环境变量
+#   若显式给了 OAI_SUBTREE 但没给 TARGETS，则只跑 oai（方便单测某个子树）
 _raw_targets="${LCM_TARGETS:-${TARGETS:-}}"
 if [ -z "$_raw_targets" ]; then
   if [ -n "${LCM_TARGET:-${TARGET:-}}" ]; then
     _raw_targets="${LCM_TARGET:-${TARGET}}"
-  elif [ -n "$OAI_SUBTREE" ]; then
-    _raw_targets="oai"
   else
-    _raw_targets="mathlib"
+    _raw_targets="mathlib,oai"      # 默认：两个都跑
   fi
 fi
 # 规范化成分隔的空格列表
@@ -75,7 +72,20 @@ MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4.git
 # 仓库规模：约 122,000 个 Lean 文件 / 1.5 GB，另有 776 篇论文 PDF（用 --filter 让 git 惰性拉取）。
 OAI_URL="${OAI_URL:-https://github.com/openai/math.git}"
 VCPU="$(nproc)"
-JOBS="${JOBS:-$(( VCPU > 8 ? 8 : (VCPU > 2 ? VCPU - 1 : 1) ))}"
+MEM_GB="$(free -g 2>/dev/null | awk '/^Mem:/{print $2}')"
+[ -z "$MEM_GB" ] && MEM_GB=16
+# 并发自动定：同时看 vCPU 和内存。
+#   · vCPU 上限 = min(vCPU-1, 8)
+#   · 内存上限 = (内存 - 8G 给系统) / 12G 每个 Lean 进程（大文件峰值可到 8–12G）
+# 例：4v/32G → min(3, (32-8)/12=2) = 2；8v/64G → min(7, 4) = 4
+if [ -z "${JOBS:-}" ]; then
+  JOBS_CPU=$(( VCPU > 8 ? 8 : (VCPU > 2 ? VCPU - 1 : 1) ))
+  JOBS_MEM=$(( (MEM_GB - 8) / 12 ))
+  [ "$JOBS_MEM" -lt 1 ] && JOBS_MEM=1
+  JOBS=$(( JOBS_CPU < JOBS_MEM ? JOBS_CPU : JOBS_MEM ))
+  JOBS_AUTO=1
+fi
+JOBS="${JOBS:-2}"
 export ELAN_HOME="${ELAN_HOME:-/root/.elan}"
 export PATH="$ELAN_HOME/bin:$PATH"
 
@@ -178,7 +188,12 @@ preflight() {
   AVAIL_GB=$(df -BG "$WORK" | awk 'NR==2{gsub("G","",$4); print $4}')
   ROOT_AVAIL_GB=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
   say "可用空间: 工作盘 ${AVAIL_GB} GB / 系统盘 ${ROOT_AVAIL_GB} GB"
-  say "并发 JOBS=$JOBS（可用 JOBS=N 覆盖）"
+  say "目标: $TARGETS${OAI_SUBTREE:+   (oai 子树=$OAI_SUBTREE)}"
+  if [ "${JOBS_AUTO:-0}" = "1" ]; then
+    say "并发 JOBS=$JOBS（自动：${VCPU} vCPU / ${MEM_GB} GB 内存 → 取 CPU 与内存上限的较小值；可用 JOBS=N 覆盖）"
+  else
+    say "并发 JOBS=$JOBS（手动指定）"
+  fi
 
   # 常见错误：网络卷没挂上 / 没挂到 /workspace，导致在大盘上空转、把 10G 系统盘写满
   if [ "$ROOT_AVAIL_GB" -lt 25 ] && [ "$WORK" != "/" ]; then
@@ -387,11 +402,12 @@ do_upload() {
   fi
 
   # 体积守卫：GitHub 单文件 100 MiB 会拒绝，>50 MiB 会告警
+  # 注意 sizeguard 是递归扫描的，返回的是【相对路径】（如 oai/measures.jsonl.gz）
   say "上传前体积检查:"
   EXCLUDE=""
   if ! node "$APP/sizeguard.mjs" "$RES" $([ "$LCM_PUSH_REFS" = "1" ] && echo --refs); then
-    EXCLUDE="measures.jsonl.gz"      # 超限则排除最重的那个，保住 summary.json
-    say "⚠️ measures 超限，本次只推 summary.json + logs"
+    EXCLUDE="measures.jsonl.gz"      # 兜底：超限时排除每个目标下最重的那个
+    say "⚠️ 有文件超过单文件上限，已排除 measures.jsonl.gz（summary.json 等仍会推）"
   fi
 
   cd "$APP"
@@ -408,15 +424,18 @@ EOF
   # 暂存目录：只放要推的文件（超限的排除在外）
   STAGE="/tmp/stage"
   rm -rf "$STAGE"; mkdir -p "$STAGE/results" "$STAGE/logs"
-  for f in "$RES"/*; do
+  # 用 find 递归遍历（结果在 results/<目标>/ 下），按【文件名】匹配排除项
+  while IFS= read -r f; do
     [ -e "$f" ] || continue
+    rel="${f#$RES/}"
     base="$(basename "$f")"
     if [ -n "$EXCLUDE" ] && [ "$base" = "$EXCLUDE" ]; then
-      say "  排除 $base（超体积上限，仅留在容器内）"
+      say "  排除 $rel（超体积上限，仅留在容器内）"
       continue
     fi
-    cp -r "$f" "$STAGE/results/" 2>/dev/null || true
-  done
+    mkdir -p "$STAGE/results/$(dirname "$rel")"
+    cp "$f" "$STAGE/results/$rel" 2>/dev/null || true
+  done < <(find "$RES" -type f 2>/dev/null)
   cp -r "$LOGS"/. "$STAGE/logs/" 2>/dev/null || true
 
   BRANCH="$RESULT_BRANCH"
@@ -452,8 +471,8 @@ EOF
 START_EPOCH=$(date +%s)
 
 # 看门狗：即使主流程卡死（编译挂住、网络卡住），到点也强制关机。
-# 默认 14 小时，可用 LCM_DEADLINE_HOURS 调整。设 0 关闭。
-DEADLINE_H="${LCM_DEADLINE_HOURS:-14}"
+# 默认 24 小时（多目标 + 低配机器的余量），可用 LCM_DEADLINE_HOURS 调整。设 0 关闭。
+DEADLINE_H="${LCM_DEADLINE_HOURS:-24}"
 if [ "$DEADLINE_H" != "0" ] && [ "${LCM_SELFTERM:-1}" != "0" ]; then
   ( sleep $(( DEADLINE_H * 3600 ))
     echo "[看门狗] 超过 ${DEADLINE_H}h 仍未结束，强制关机" >> "$LOGS/watchdog.log"
