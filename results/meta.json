@@ -1,0 +1,20 @@
+{
+ "targets": [
+  "mathlib",
+  "oai"
+ ],
+ "subtree": "OAI/Analysis/Crouzeix",
+ "generated_at": "2026-10-11T05:27:37.227Z",
+ "work_dir": "/work",
+ "cpu": {
+  "vcpu": 128,
+  "model": "AMD EPYC 9575F 64-Core Processor"
+ },
+ "memory_gb": 811,
+ "node": "v18.19.1",
+ "lean": "Lean (version 4.34.1, x86_64-unknown-linux-gnu, commit 5045d0056413266e57c625dcd7c365b10e377c52, Release)",
+ "commits": {
+  "mathlib": "2da3ab0a20dc0c66f56a557e37df39f7d36cb953",
+  "oai": null
+ }
+}

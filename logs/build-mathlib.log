@@ -1,0 +1,73 @@
+[2026-10-11T05:26:39Z] [mathlib] 拉 mathlib 预编译缓存（失败则要自行编译，1–3 小时）
+info: plausible: materializing new dependency
+info: plausible: fetching revision 'aef59637faa9e85fa2486acaaf906ce3f572af7c' from https://github.com/leanprover-community/plausible
+info: plausible: checking out revision 'aef59637faa9e85fa2486acaaf906ce3f572af7c'
+info: LeanSearchClient: materializing new dependency
+info: LeanSearchClient: fetching revision '234d9e074fbd6e911b920baf32db5291c3125be0' from https://github.com/leanprover-community/LeanSearchClient
+info: LeanSearchClient: checking out revision '234d9e074fbd6e911b920baf32db5291c3125be0'
+info: importGraph: materializing new dependency
+info: importGraph: fetching revision '579f558774c4ac6840e715ba60dabf3030619349' from https://github.com/leanprover-community/import-graph
+info: importGraph: checking out revision '579f558774c4ac6840e715ba60dabf3030619349'
+info: proofwidgets: materializing new dependency
+info: proofwidgets: fetching revision 'd5ad4a0b79fa7f9818fe1380d05a3f6143823c09' from https://github.com/leanprover-community/ProofWidgets4
+info: proofwidgets: checking out revision 'd5ad4a0b79fa7f9818fe1380d05a3f6143823c09'
+info: aesop: materializing new dependency
+info: aesop: fetching revision '04879b1e1de744d5c9777c8cf63fa55a8f652e5e' from https://github.com/leanprover-community/aesop
+info: aesop: checking out revision '04879b1e1de744d5c9777c8cf63fa55a8f652e5e'
+info: Qq: materializing new dependency
+info: Qq: fetching revision 'e7c4cdd2f1bf9df361ef7f621b4d6867012ab65e' from https://github.com/leanprover-community/quote4
+info: Qq: checking out revision 'e7c4cdd2f1bf9df361ef7f621b4d6867012ab65e'
+info: batteries: materializing new dependency
+info: batteries: fetching revision 'b71aaf60877e673fdb921f06f20987d12ee8a290' from https://github.com/leanprover-community/batteries
+info: batteries: checking out revision 'b71aaf60877e673fdb921f06f20987d12ee8a290'
+info: Cli: materializing new dependency
+info: Cli: fetching revision '82c11b9717083154aefc5fe8d4cba4bbf046298f' from https://github.com/leanprover/lean4-cli
+info: Cli: checking out revision '82c11b9717083154aefc5fe8d4cba4bbf046298f'
+✔ [1/5] Built Cache.Cli (234ms)
+✔ [2/5] Built Cache.Lean (264ms)
+✔ [7/42] Built Cache.Cli:c.o (108ms)
+✔ [8/42] Built Cache.Lean:c.o (127ms)
+✔ [9/42] Built Cache.Env (220ms)
+✔ [10/42] Built Cache.Env:c.o (112ms)
+✔ [11/42] Built Cache.Infra (242ms)
+✔ [12/42] Built Cache.Infra:c.o (125ms)
+✔ [13/42] Built Cache.Location (272ms)
+✔ [14/42] Built Cache.Location:c.o (121ms)
+✔ [15/42] Built Batteries.Tactic.OpenPrivate:c.o (905ms)
+✔ [16/42] Built Cache.IO (1.1s)
+✔ [17/42] Built Cache.Hashing (434ms)
+✔ [18/42] Built Cache.Hashing:c.o (306ms)
+✔ [19/42] Built Cache.IO:c.o (1.1s)
+✔ [20/42] Built Cache.Requests (1.0s)
+✔ [21/42] Built Cache.Marker (212ms)
+✔ [22/42] Built Cache.Marker:c.o (112ms)
+✔ [23/42] Built Cache.Upload.Curl (391ms)
+✔ [24/42] Built Cache.Query (401ms)
+✔ [25/42] Built Cache.Upload.Rclone (531ms)
+✔ [26/42] Built Cache.Upload.Curl:c.o (133ms)
+✔ [27/42] Built Cache.Query:c.o (210ms)
+✔ [28/42] Built Cache.Upload.Azure (319ms)
+✔ [29/42] Built Cache.Upload.Rclone:c.o (207ms)
+✔ [30/42] Built Cache.Upload.Azure:c.o (79ms)
+✔ [31/42] Built Cache.Warning (495ms)
+✔ [32/42] Built Cache.Upload.S3 (554ms)
+✔ [33/42] Built Cache.Warning:c.o (188ms)
+✔ [34/42] Built Cache.Upload.S3:c.o (148ms)
+✔ [35/42] Built Cache.Upload.Defs (318ms)
+✔ [36/42] Built Cache.Requests:c.o (1.7s)
+✔ [37/42] Built Cache.Upload.Defs:c.o (139ms)
+✔ [38/42] Built Cache.Upload (262ms)
+✔ [39/42] Built Cache.Upload:c.o (82ms)
+✔ [40/42] Built Cache.Main (470ms)
+✔ [41/42] Built Cache.Main:c.o (462ms)
+✔ [42/42] Built cache:exe (536ms)
+[2026-10-11T05:27:23Z] [mathlib] 拉 mathlib 预编译缓存（失败则要自行编译，1–3 小时）
+Current branch: master
+Using cache from origin: (some leanprover-community/mathlib4)
+Decompressing 8830 already-cached file(s) (193 already decompressed)
+No files to download
+Decompressed 8830 already-cached file(s)
+Completed successfully in 8703 ms!
+[2026-10-11T05:27:33Z] [mathlib] 编译 Mathlib 根模块，-j 7
+error: unknown short option '-j'
+[2026-10-11T05:27:33Z] [mathlib] build 完成，产物: 6.7G
