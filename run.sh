@@ -14,41 +14,8 @@ set -euo pipefail
 PHASE="${1:-all}"
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ---------- 工作目录：必须放大盘，不能放系统盘 ----------
-# RunPod 的磁盘分两类：
-#   Container Disk  = 系统盘，通常只有 10 GB —— 放不下 Lean 编译产物
-#   Volume（网络卷）= 通常挂在 /workspace，容量大
-# 注意：/workspace 可能【只是系统盘上的一个普通目录】（卷没真挂上），
-# 所以必须比较设备号确认它是独立文件系统，否则等于还是在系统盘里干活。
-dev_of() { stat -c %d "$1" 2>/dev/null || echo ""; }
-
-if [ -n "${LCM_WORK:-${WORK:-}}" ]; then
-  WORK="${LCM_WORK:-${WORK}}"
-  WORK_SRC="显式指定"
-else
-  ROOT_DEV="$(dev_of /)"
-  WORK=""
-  for cand in /workspace /runpod-volume /workspace/lean; do
-    if [ -d "$cand" ] && [ "$(dev_of "$cand")" != "$ROOT_DEV" ]; then
-      WORK="$cand"; WORK_SRC="自动探测（独立挂载点）"; break
-    fi
-  done
-  if [ -z "$WORK" ]; then
-    # 没有独立挂载点：退而求其次，看哪个目录所在文件系统剩余空间最大
-    for cand in /workspace /work; do
-      [ -d "$cand" ] || mkdir -p "$cand" 2>/dev/null || continue
-      WORK="$cand"; WORK_SRC="自动探测（⚠️ 与系统盘同一文件系统，不是独立卷）"; break
-    done
-  fi
-  WORK="${WORK:-$APP/work}"
-  WORK_SRC="${WORK_SRC:-回退到脚本目录}"
-fi
-mkdir -p "$WORK" 2>/dev/null || true
-
-# 把工作目录下的大件都放过去；结果与日志也放工作目录（避免写满系统盘）
-RES="$WORK/results"
-LOGS="$WORK/logs"
-mkdir -p "$RES" "$LOGS"
+# ---------- 工作目录在下面「选择工作目录」一节决定 ----------
+# （优先系统盘本地 NVMe；系统盘不够才用网络卷）
 
 # ---------- 可调参数 ----------
 # 环境变量带 LCM_ 前缀可避免与其它项目串味（RunPod 的 Secrets 是账号级的）。
@@ -79,12 +46,33 @@ GH_REPO="${LCM_GH_REPO:-${GH_REPO:-lxingrui/lean-cone-measure}}"
 OAI_FULL="${LCM_OAI_FULL:-${OAI_FULL:-0}}"
 LCM_PUSH_REFS="${LCM_PUSH_REFS:-${PUSH_REFS:-0}}"
 RESULT_BRANCH="${LCM_RESULT_BRANCH:-${RESULT_BRANCH:-results}}"
+# 本次运行大约需要多少工作空间（探盘与守卫共用）
+# 估算依据（mathlib+oai 两个目标）：
+#   mathlib 缓存解包峰值 ~7G + mathlib olean ~7G + OAI 源码 1.5G
+#   + 42 个依赖源码/olean ~15G + git 对象与中间产物 ~5G
+WORK_NEED_GB=60
+case " $TARGETS " in *" oai "*) [ "$OAI_FULL" = "1" ] && WORK_NEED_GB=110 ;; esac
 LEAN_TOOLCHAIN="${LEAN_TOOLCHAIN:-leanprover/lean4:v4.34.1}"   # 与 OAI 仓库 lean-toolchain 一致
 MATHLIB_URL="${MATHLIB_URL:-https://github.com/leanprover-community/mathlib4.git}"
 # OpenAI 数学仓库（public）。已核对：本地克隆的 .git/config 里 origin 就是这个地址，
 # 且实测开放匿名访问 —— pod 里不带 token 也能拉。
 # 仓库规模：约 122,000 个 Lean 文件 / 1.5 GB，另有 776 篇论文 PDF（用 --filter 让 git 惰性拉取）。
 OAI_URL="${OAI_URL:-https://github.com/openai/math.git}"
+
+# ---------- 工作目录：固定用系统盘 ----------
+# RunPod 的 Container Disk（系统盘）是本地 NVMe，比网络卷快得多；
+# 本任务结果都推 GitHub，不需要持久化，所以直接用系统盘，不用网络卷。
+# 想换位置就设 LCM_WORK=<路径>。
+WORK="${LCM_WORK:-/work}"
+mkdir -p "$WORK" "$WORK/results" "$WORK/logs" 2>/dev/null || true
+RES="$WORK/results"
+LOGS="$WORK/logs"
+WORK_SRC="系统盘（Container Disk）"
+
+# 结果与日志也放工作目录
+RES="$WORK/results"
+LOGS="$WORK/logs"
+mkdir -p "$RES" "$LOGS"
 VCPU="$(nproc)"
 MEM_GB="$(free -g 2>/dev/null | awk '/^Mem:/{print $2}')"
 [ -z "$MEM_GB" ] && MEM_GB=16
@@ -207,9 +195,8 @@ preflight() {
   AVAIL_GB="${AVAIL_GB:-0}"; ROOT_AVAIL_GB="${ROOT_AVAIL_GB:-0}"
   say "可用空间: 工作盘 ${AVAIL_GB} GB / 系统盘 ${ROOT_AVAIL_GB} GB"
 
-  # 关键守卫：工作盘必须够大。mathlib+oai 两个目标约需 40 GB。
-  NEED_GB=40
-  case " $TARGETS " in *" oai "*) [ "$OAI_FULL" = "1" ] && NEED_GB=110 ;; esac
+  # 关键守卫：工作盘必须够大
+  NEED_GB="$WORK_NEED_GB"
   if [ "$AVAIL_GB" -lt "$NEED_GB" ]; then
     say "❌ 工作盘只有 ${AVAIL_GB} GB，本次需要约 ${NEED_GB} GB"
     say ""
